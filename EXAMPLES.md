@@ -58,6 +58,20 @@ Read-Host "PAT" | vault put github-pat --field password --username me
 Get-Clipboard   | vault put openai-api --field password
 ```
 
+## File a new item in a folder
+
+```sh
+vault folders                                  # names + item counts
+read -rs P && printf %s "$P" | vault put cloudns --field password --folder "Cloud & DNS Tokens"
+
+# multi-field account: the folder only needs to be given once, on creation
+printf %s "$EMAIL" | vault put cloudns --field email
+```
+
+The folder must already exist — an unknown name errors out and lists the real
+folders instead of guessing. Passing `--folder` on an existing item moves it;
+omitting it leaves the item where it is.
+
 ## Feed a Kubernetes Secret without the value touching the transcript
 
 ```sh
@@ -69,9 +83,10 @@ vault run my-db=PGPASS -- bash -c \
 ## Inspect (safe — no values)
 
 ```sh
-vault list                 # everything: names, field names, attachment names
+vault list                 # everything: names, folder, field/attachment names
 vault list github          # filtered
-vault get github-pat       # metadata: username, uri, which fields exist
+vault folders              # folder names + item counts
+vault get github-pat       # metadata: folder, username, uri, which fields exist
 vault status               # server + lock state
 ```
 

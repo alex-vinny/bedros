@@ -89,9 +89,52 @@ function fieldValue(item, field) {
   return custom?.value;
 }
 
+function folders() { return bwJson(["list", "folders"]).filter(f => f.id); } // drop the synthetic "No Folder"
+
+function folderNames() { // id -> name, for display
+  return Object.fromEntries(folders().map(f => [f.id, f.name]));
+}
+
+// Exact (case-insensitive) match only. A typo must NOT silently create a new
+// folder or fall back to "No Folder" — that is how a tidy vault fragments.
+function resolveFolder(name) {
+  const all = folders();
+  const hit = all.find(f => f.name.toLowerCase() === name.toLowerCase());
+  if (!hit)
+    die(`No folder named "${name}". Existing folders:\n` +
+      all.map(f => `  ${f.name}`).join("\n") +
+      `\nCreate it in the web UI first — vault won't invent a folder from a typo.`);
+  return hit.id;
+}
+
+// --- arg parsing -------------------------------------------------------
+// Flags whose VALUE is the next argv entry. The table is what keeps a value
+// out of the positionals: in `put --folder "Cloud & DNS" name` the item name
+// is `name`, regardless of flag order.
+const VALUE_FLAGS = new Set(["--field", "--username", "--folder", "-o"]);
+const BOOL_FLAGS = new Set(["--reveal"]);
+
+function parseArgs(argv) {
+  const opts = {}, pos = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (VALUE_FLAGS.has(a)) {
+      const v = argv[++i];
+      if (v === undefined) die(`${a} needs a value`);
+      opts[a.replace(/^--?/, "")] = v;
+    } else if (BOOL_FLAGS.has(a)) {
+      opts[a.slice(2)] = true;
+    } else if (a.startsWith("-")) {
+      die(`unknown flag "${a}"`);
+    } else pos.push(a);
+  }
+  return { opts, pos };
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
-const flags = new Set(rest.filter(a => a.startsWith("--")));
-const pos = rest.filter(a => !a.startsWith("--"));
+// `run` takes a verbatim command line after `--`; parsing it here would eat the
+// child command's own flags, so `run` works off `rest` directly.
+const { opts, pos } = cmd === "run" ? { opts: {}, pos: [] } : parseArgs(rest);
 
 switch (cmd) {
   case "status": {
@@ -132,8 +175,10 @@ switch (cmd) {
   case "list": {
     requireUnlocked();
     const items = bwJson(pos[0] ? ["list", "items", "--search", pos[0]] : ["list", "items"]);
+    const names = folderNames();
     for (const i of items) {
       const extras = [];
+      if (names[i.folderId]) extras.push(`folder=${names[i.folderId]}`);
       if (i.login?.username) extras.push(`user=${i.login.username}`);
       if (i.fields?.length) extras.push(`fields=${i.fields.map(f => f.name).join(",")}`);
       if (i.attachments?.length) extras.push(`attachments=${i.attachments.map(a => a.fileName).join(",")}`);
@@ -146,13 +191,15 @@ switch (cmd) {
   case "get": { // metadata by default; value only with --reveal (user must have asked)
     requireUnlocked();
     const item = findItem(pos[0] ?? die("usage: vault get <item> [--field <f>] [--reveal]"));
-    const fieldFlag = rest.find((a, i) => rest[i - 1] === "--field");
-    if (flags.has("--reveal")) {
+    const fieldFlag = opts.field;
+    if (opts.reveal) {
       const v = fieldValue(item, fieldFlag);
       if (v == null) die(`Field "${fieldFlag || "password"}" is empty on "${item.name}".`);
       process.stdout.write(v);
     } else {
       console.log(`name:        ${item.name}`);
+      const folder = folderNames()[item.folderId];
+      if (folder) console.log(`folder:      ${folder}`);
       if (item.login?.username) console.log(`username:    ${item.login.username}`);
       if (item.login?.uris?.length) console.log(`uri:         ${item.login.uris[0].uri}`);
       if (item.login?.password) console.log(`password:    (set — use --reveal or 'vault run')`);
@@ -198,8 +245,7 @@ switch (cmd) {
 
   case "export": { // vault export <item> <attachmentName> -o <path>
     requireUnlocked();
-    const oIdx = rest.indexOf("-o");
-    const out = oIdx >= 0 ? rest[oIdx + 1] : null;
+    const out = opts.o;
     if (!pos[0] || !pos[1] || !out) die("usage: vault export <item> <attachmentName> -o <path>");
     const item = findItem(pos[0]);
     bw(["get", "attachment", pos[1], "--itemid", item.id, "--output", out]);
@@ -218,19 +264,25 @@ switch (cmd) {
 
   case "put": { // vault put <name> [--field <f>] — VALUE READ FROM STDIN (never argv)
     requireUnlocked();
-    const name = pos[0] ?? die("usage: echo <value> | vault put <name> [--field <f>] [--username <u>]");
-    const fieldFlag = rest.find((a, i) => rest[i - 1] === "--field") || "password";
-    const userFlag = rest.find((a, i) => rest[i - 1] === "--username");
+    const name = pos[0] ?? die("usage: echo <value> | vault put <name> [--field <f>] [--username <u>] [--folder <F>]");
+    const fieldFlag = opts.field || "password";
+    const userFlag = opts.username;
+    // resolve BEFORE reading stdin, so a bad folder name fails without consuming the secret
+    const folderId = opts.folder === undefined ? undefined : resolveFolder(opts.folder);
     // strip BOM (PowerShell pipes prepend one) and trailing newline
     const value = readFileSync(0, "utf8").replace(/^\uFEFF/, "").replace(/\r?\n$/, "");
     if (!value) die("no value on stdin");
     const found = bw(["get", "item", name, "--raw"], { allowFail: true });
     let item = found.status === 0 ? JSON.parse(found.stdout) : null;
+    const existed = !!item;
     if (!item) {
       item = JSON.parse(bw(["get", "template", "item", "--raw"]).stdout);
       item.name = name; item.notes = null; item.login = { username: userFlag ?? null, password: null, uris: [] };
-      item.fields = [];
+      item.fields = []; item.folderId = null;
     }
+    // only touch folderId when --folder was passed, so a plain field update
+    // never yanks an existing item out of its folder
+    if (folderId !== undefined) item.folderId = folderId;
     if (["password", "username", "notes"].includes(fieldFlag)) {
       if (fieldFlag === "notes") item.notes = value;
       else { item.login = item.login || {}; item.login[fieldFlag] = value; }
@@ -241,10 +293,22 @@ switch (cmd) {
       else item.fields.push({ name: fieldFlag, value, type: 1 }); // type 1 = hidden
     }
     const b64 = Buffer.from(JSON.stringify(item)).toString("base64");
-    if (item.id) bw(["edit", "item", item.id, b64]);
+    if (existed) bw(["edit", "item", item.id, b64]);
     else bw(["create", "item", b64]);
     bw(["sync"], { allowFail: true });
-    console.log(`${item.id ? "updated" : "created"} "${name}" (${fieldFlag})`);
+    const where = opts.folder ? ` in "${opts.folder}"` : "";
+    console.log(`${existed ? "updated" : "created"} "${name}" (${fieldFlag})${where}`);
+    break;
+  }
+
+  case "folders": { // folder names + how many items sit in each
+    requireUnlocked();
+    const items = bwJson(["list", "items"]);
+    const counts = {};
+    for (const i of items) counts[i.folderId] = (counts[i.folderId] || 0) + 1;
+    for (const f of folders()) console.log(`${f.name}  (${counts[f.id] || 0})`);
+    const loose = items.filter(i => !i.folderId).length;
+    if (loose) console.log(`(no folder)  (${loose})`);
     break;
   }
 
@@ -266,12 +330,14 @@ switch (cmd) {
   login                                     interactive (run in YOUR terminal)
   unlock                                    interactive; caches session for agents
   lock                                      clear cached session
-  list [search]                             item names + field/attachment names (no values)
+  list [search]                             item names + folder/field/attachment names (no values)
+  folders                                   folder names + item counts
   get <item> [--field f] [--reveal]         metadata; value only with --reveal
   run <item>[:field]=ENV ... -- <cmd...>    run cmd with secrets injected as env
   export <item> <attachment> -o <path>      download attachment (kubeconfig, PEM...)
   attach <item> <file>                      upload attachment
-  put <name> [--field f] [--username u]     create/update; value from STDIN
+  put <name> [--field f] [--username u] [--folder F]
+                                            create/update; value from STDIN
   rm <item>                                 delete an item
   sync                                      pull latest vault state
 
