@@ -11,6 +11,7 @@ node vault.mjs <command>
 
 - **Node.js 18+**
 - `npm install` in this directory once (bundles the Bitwarden `bw` CLI — no separate install).
+- A reachable Vaultwarden/Bitwarden server (`VAULTWARDEN_URL`) and an account on it.
 
 ## Setup
 
