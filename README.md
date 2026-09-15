@@ -89,6 +89,28 @@ echo "$NEW_KEY" | vault put openai-api --field password
 
 Many more in [EXAMPLES.md](EXAMPLES.md).
 
+## Bundled scripts
+
+`scripts/` holds small programs meant to be run *through* `vault run`, so the secret
+reaches them as an env var and never touches argv, shell history or an agent transcript.
+
+### `open-pr.mjs` — open or edit a GitHub PR without `gh`
+
+```bash
+node vault.mjs run github-pat=GITHUB_TOKEN -- node scripts/open-pr.mjs \
+  --repo alex-vinny/nepomuk --head my-branch --base main \
+  --title "feat: ..." --body-file /path/to/body.md
+
+# the branch grew after the PR was opened and the description no longer fits
+node vault.mjs run github-pat=GITHUB_TOKEN -- node scripts/open-pr.mjs \
+  --repo alex-vinny/nepomuk --update 3 --body-file /path/to/body.md
+```
+
+Standard library only, so it works wherever Node does — `gh` is not installed on every
+machine and installing it is not always the agent's call. If a PR is already open for that
+head it prints the existing one and exits 0, rather than failing in a way that invites a
+retry and a duplicate.
+
 ## Tests
 
 `npm test` runs `test/selftest.mjs` — an integration suite against your
