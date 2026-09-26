@@ -59,10 +59,11 @@ function bwJson(args) {
   try { return JSON.parse(r.stdout); } catch { die(`bw returned non-JSON: ${r.stdout.slice(0, 200)}`); }
 }
 
+const LOGIN_HINT = `In YOUR terminal run:\n  node "${join(__dirname, "vault.mjs")}" login\nthen unlock again.`;
+
 function requireUnlocked() {
   const st = bwJson(["status"]);
-  if (st.status === "unauthenticated")
-    die(`Not logged in. In YOUR terminal run:\n  node "${join(__dirname, "vault.mjs")}" login`);
+  if (st.status === "unauthenticated") die(`Not logged in. ${LOGIN_HINT}`);
   if (st.status === "locked")
     die(`Vault locked. In YOUR terminal run:\n  node "${join(__dirname, "vault.mjs")}" unlock`);
 }
@@ -153,13 +154,19 @@ switch (cmd) {
   }
 
   case "unlock": { // interactive — caches session (user-only file) for later commands
+    if (bwJson(["status"]).status === "unauthenticated") die(`Not logged in. ${LOGIN_HINT}`);
     mkdirSync(SESSION_DIR, { recursive: true });
     const r = spawnSync(process.execPath, [BW_JS, "unlock", "--raw"], {
       env: { ...process.env, BITWARDENCLI_APPDATA_DIR: SESSION_DIR },
       encoding: "utf8", stdio: ["inherit", "pipe", "inherit"],
     });
     const s = (r.stdout || "").trim();
-    if (r.status !== 0 || !s) die("unlock failed");
+    if (r.status !== 0 || !s) {
+      // server rejected the saved login (invalid_grant) — bw logs out as it fails
+      if (bwJson(["status"]).status === "unauthenticated")
+        die(`\nunlock failed: the server rejected the saved login (expired or revoked). ${LOGIN_HINT}`);
+      die("unlock failed");
+    }
     writeFileSync(SESSION_FILE, s, { mode: 0o600 });
     console.log(`Session cached at ${SESSION_FILE}\nClear it anytime with: vault lock`);
     break;

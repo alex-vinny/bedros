@@ -4,7 +4,7 @@
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { writeFileSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdtempSync, rmSync, mkdirSync, copyFileSync } from "node:fs";
 import os from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -41,6 +41,40 @@ function check(name, cond, detail = "") {
 }
 
 console.log("== vault-cli self-test ==");
+
+// offline: a fresh home dir has no bw login — unlock must say "login", not crash
+{
+  const home = mkdtempSync(join(os.tmpdir(), "vaultcli-home-"));
+  const r = spawnSync(process.execPath, [VAULT, "unlock"], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, HOME: home, USERPROFILE: home, BW_SESSION: "" },
+  });
+  check("unlock while logged out points to login",
+    r.status === 1 && /Not logged in[\s\S]*login/.test(r.stderr), r.stdout + r.stderr);
+  rmSync(home, { recursive: true, force: true });
+}
+
+// offline: status says "locked", then the server rejects the saved login mid-unlock
+// (invalid_grant — bw logs itself out). Fake bw next to a copy of vault.mjs.
+{
+  const dir = mkdtempSync(join(os.tmpdir(), "vaultcli-fake-"));
+  const bwDir = join(dir, "node_modules", "@bitwarden", "cli", "build");
+  mkdirSync(bwDir, { recursive: true });
+  copyFileSync(VAULT, join(dir, "vault.mjs"));
+  writeFileSync(join(bwDir, "bw.js"), `
+    const fs = require("fs"), p = require("path").join(process.env.BITWARDENCLI_APPDATA_DIR, "fake-state");
+    const state = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "locked";
+    if (process.argv[2] === "status") { process.stdout.write(JSON.stringify({ status: state })); process.exit(0); }
+    if (process.argv[2] === "unlock") { fs.writeFileSync(p, "unauthenticated"); console.error("invalid_grant"); process.exit(1); }
+    process.exit(1);`);
+  const r = spawnSync(process.execPath, [join(dir, "vault.mjs"), "unlock"], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, HOME: dir, USERPROFILE: dir, BW_SESSION: "" },
+  });
+  check("unlock rejected mid-way points to login",
+    r.status === 1 && /rejected the saved login[\s\S]*login/.test(r.stderr), r.stdout + r.stderr);
+  rmSync(dir, { recursive: true, force: true });
+}
 
 // 0. must be unlocked
 const st = vault(["status"]);
